@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <title>FastAPI ASR</title>
+  </head>
+  <body class="min-h-screen bg-white text-black">
+    <main
+      class="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 px-4 py-8"
+    >
+      <section class="border border-gray-300 rounded-lg shadow bg-white p-6">
+        <h1 class="text-3xl font-bold">FastAPI ASR</h1>
+        <p class="mt-2 text-sm">
+          Minimal browser microphone stream to FastAPI WebSocket to Deepgram
+          sandbox transcript JSON.
+        </p>
+      </section>
+
+      <section class="grid gap-4 md:grid-cols-2">
+        <div class="border border-gray-300 rounded-lg shadow bg-white p-4">
+          <h2 class="text-lg font-semibold">Health Check</h2>
+
+          <button
+            id="healthBtn"
+            class="mt-3 rounded bg-black px-4 py-2 text-white"
+          >
+            Check Health
+          </button>
+
+          <pre id="healthResult" class="mt-3 text-sm"></pre>
+        </div>
+
+        <div class="border border-gray-300 rounded-lg shadow bg-white p-4">
+          <h2 class="text-lg font-semibold">Deepgram Sample</h2>
+
+          <button
+            id="sampleBtn"
+            class="mt-3 rounded bg-black px-4 py-2 text-white"
+          >
+            Run Sample
+          </button>
+
+          <pre id="sampleResult" class="mt-3 text-sm whitespace-pre-wrap"></pre>
+        </div>
+      </section>
+      <section class="flex flex-wrap gap-3">
+        <button
+          id="start"
+          class="rounded-xl border border-green-700 bg-green-600 px-4 py-2 font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Start Recording
+        </button>
+        <button
+          id="stop"
+          disabled
+          class="rounded-xl border border-red-700 bg-red-600 px-4 py-2 font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Stop Recording
+        </button>
+        <div
+          class="border border-gray-300 rounded-lg shadow bg-white p-4 text-sm"
+        >
+          Status: <span id="status" class="font-semibold">idle</span>
+        </div>
+      </section>
+      <section class="grid gap-4 md:grid-cols-2">
+        <div class="border border-gray-300 rounded-lg shadow bg-white p-4">
+          <h2 class="text-lg font-semibold">Transcript</h2>
+          <div id="transcripts" class="mt-3 space-y-3"></div>
+        </div>
+
+        <div
+          class="border border-gray-300 rounded-lg shadow bg-white p-4 text-sm leading-6"
+        >
+          <h2 class="text-lg font-semibold">How it works</h2>
+          <p class="mt-3">
+            1. Click <span class="font-semibold">Start Recording</span>.
+          </p>
+          <p>
+            2. The browser sends audio chunks over
+            <code class="font-mono">/ws</code>.
+          </p>
+          <p>3. The server forwards them to Deepgram sandbox.</p>
+          <p>4. Transcript events come back as JSON.</p>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const transcriptsEl = document.getElementById("transcripts");
+      const startBtn = document.getElementById("start");
+      const stopBtn = document.getElementById("stop");
+
+      let socket = null;
+      let recorder = null;
+      let stream = null;
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function addTranscript(payload) {
+        const item = document.createElement("div");
+        item.className = "border border-black p-3";
+
+        const label = document.createElement("strong");
+        label.className = "block text-sm";
+        label.textContent = payload.is_final ? "Final" : "Interim";
+
+        const text = document.createElement("div");
+        text.className = "mt-1 text-sm";
+        text.textContent = payload.transcript;
+
+        item.appendChild(label);
+        item.appendChild(text);
+        transcriptsEl.prepend(item);
+      }
+
+      function socketUrl() {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        return `${protocol}//${location.host}/ws`;
+      }
+
+      function openSocket() {
+        socket = new WebSocket(socketUrl());
+
+        socket.onopen = () => {
+          setStatus("connected");
+        };
+
+        socket.onmessage = (event) => {
+          if (typeof event.data !== "string") {
+            return;
+          }
+
+          let payload;
+          try {
+            payload = JSON.parse(event.data);
+          } catch {
+            if (event.data === "connected") {
+              setStatus("connected");
+            }
+            return;
+          }
+
+          if (payload.type === "transcript" && payload.transcript) {
+            addTranscript(payload);
+          }
+
+          if (payload.type === "error") {
+            setStatus(payload.message);
+          }
+        };
+
+        socket.onclose = () => {
+          setStatus("closed");
+        };
+
+        socket.onerror = () => {
+          setStatus("error");
+        };
+      }
+
+      async function startRecording() {
+        transcriptsEl.innerHTML = "";
+        setStatus("requesting microphone");
+
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        openSocket();
+
+        const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : "";
+
+        recorder = new MediaRecorder(
+          stream,
+          mimeType ? { mimeType } : undefined,
+        );
+
+        // Send each audio chunk to the websocket server.
+        recorder.ondataavailable = async (event) => {
+          if (!event.data || event.data.size === 0) {
+            return;
+          }
+
+          const buffer = await event.data.arrayBuffer();
+
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(buffer);
+          }
+        };
+
+        recorder.onstart = () => {
+          setStatus("recording");
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        };
+
+        recorder.onstop = () => {
+          setStatus("stopped");
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        };
+
+        recorder.start(1000);
+      }
+
+      async function stopRecording() {
+        if (recorder && recorder.state !== "inactive") {
+          recorder.stop();
+        }
+
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      }
+
+      startBtn.addEventListener("click", async () => {
+        try {
+          await startRecording();
+        } catch (error) {
+          setStatus(error.message);
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        }
+      });
+
+      stopBtn.addEventListener("click", async () => {
+        await stopRecording();
+      });
+      const healthBtn = document.getElementById("healthBtn");
+      const sampleBtn = document.getElementById("sampleBtn");
+
+      const healthResult = document.getElementById("healthResult");
+
+      const sampleResult = document.getElementById("sampleResult");
+
+      healthBtn.addEventListener("click", async () => {
+        healthResult.textContent = "Checking...";
+
+        const response = await fetch("/health");
+
+        const data = await response.json();
+
+        healthResult.textContent = JSON.stringify(data, null, 2);
+      });
+
+      sampleBtn.addEventListener("click", async () => {
+        sampleResult.textContent = "Transcribing...";
+
+        const response = await fetch("/sample");
+
+        const data = await response.json();
+
+        sampleResult.textContent = JSON.stringify(data, null, 2);
+      });
+    </script>
+  </body>
+</html>
