@@ -1,7 +1,9 @@
 import os
+import asyncio
 import json
 import threading
 from queue import Queue
+from unittest import result
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -22,25 +24,10 @@ async def home():
     return FileResponse("index.html")
 
 
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "service": "FastAPI + Deepgram"
-    }
-
-
 @app.get("/sample")
 async def sample():
-    """
-    Simple Deepgram sample endpoint.
-
-    Demonstrates that the API key works.
-    Uses Deepgram-hosted audio.
-    """
-
+    # simple sample endpoint to demonstrate Deepgram API key works
     try:
-
         client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
 
         response = client.listen.v1.media.transcribe_url(
@@ -69,19 +56,34 @@ async def sample():
         }
 
 
+@app.get("/connect-signature")
+async def connect_signature():
+
+    import inspect
+
+    deepgram = DeepgramClient(
+        api_key=DEEPGRAM_API_KEY
+    )
+
+    return {
+        "signature": str(
+            inspect.signature(
+                deepgram.listen.v1.connect
+            )
+        )
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
 
+    loop = asyncio.get_running_loop()
+
     await websocket.send_text(json.dumps({
         "type": "status",
-        "message": "Connected to FastAPI"
+        "message": "Connecting to Deepgram..."
     }))
-
-    # Queue used to move audio chunks
-    # from FastAPI async world
-    # into Deepgram thread.
-    audio_queue = Queue()
 
     try:
         deepgram = DeepgramClient(
@@ -91,17 +93,25 @@ async def websocket_endpoint(websocket: WebSocket):
         with deepgram.listen.v1.connect(
             model="nova-3",
             language="en",
-        ) as transcript_connection:
-            ready_event = threading.Event()
+            smart_format=True,
+            interim_results=True,
+        ) as dg:
 
-            # Deepgram Open Event
+            ready = threading.Event()
+
+            # -----------------------------
+            # Deepgram connection opened
+            # -----------------------------
             def on_open(_):
-                ready_event.set()
                 print("Deepgram connected")
+                ready.set()
 
-            # Transcript Event
+            # -----------------------------
+            # Transcript event
+            # -----------------------------
             def on_message(result):
-
+                print("EVENT:", getattr(result, "type", None))
+                print(result)
                 try:
                     channel = getattr(
                         result,
@@ -131,77 +141,131 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     }
 
+                    print(payload)
+
                     # Send transcript back to browser
-                    import asyncio
-                    asyncio.run(
+                    asyncio.run_coroutine_threadsafe(
                         websocket.send_text(
                             json.dumps(payload)
-                        )
+                        ),
+                        loop
                     )
 
                 except Exception as e:
                     print("Transcript Error:", e)
 
+            # -----------------------------
+            # Error event
+            # -----------------------------
+            def on_error(error):
+                print("Deepgram Error:", error)
+
+            # -----------------------------
             # Register events
-            transcript_connection.on(
+            # -----------------------------
+            dg.on(
                 EventType.OPEN,
                 on_open
             )
 
-            transcript_connection.on(
+            dg.on(
                 EventType.MESSAGE,
                 on_message
             )
 
-            # Start Deepgram connection
-            transcript_connection.start_listening()
+            try:
+                dg.on(
+                    EventType.ERROR,
+                    on_error
+                )
+            except:
+                pass
 
-            # Background thread: forward audio chunks to deepgram
-            def audio_sender():
-
-                ready_event.wait()
-
-                while True:
-
-                    chunk = audio_queue.get()
-
-                    if chunk is None:
-                        break
-
-                    transcript_connection.send_media(
-                        chunk
-                    )
-
-            sender_thread = threading.Thread(
-                target=audio_sender,
+            # -----------------------------
+            # Start listener thread
+            # -----------------------------
+            listener_thread = threading.Thread(
+                target=dg.start_listening,
                 daemon=True
             )
 
-            sender_thread.start()
+            listener_thread.start()
 
-            await websocket.send_text(json.dumps({
-                "type": "status",
-                "message": "Deepgram connected"
-            }))
+            # Wait for Deepgram websocket
+            ready.wait(timeout=10)
 
-            # Receive audio chunks from browser
+            if not ready.is_set():
+
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "error",
+                        "message": "Failed to connect to Deepgram"
+                    })
+                )
+
+                return
+
+            await websocket.send_text(
+                json.dumps({
+                    "type": "status",
+                    "message": "Deepgram connected"
+                })
+            )
+
+            print("Ready for microphone audio")
+
+            # -----------------------------
+            # Keep-alive thread
+            # -----------------------------
+            def keep_alive():
+
+                while True:
+
+                    try:
+                        dg.send_keep_alive()
+                    except:
+                        break
+
+                    import time
+                    time.sleep(5)
+
+            threading.Thread(
+                target=keep_alive,
+                daemon=True
+            ).start()
+
+            # -----------------------------
+            # Receive browser audio
+            # -----------------------------
             while True:
+
                 chunk = await websocket.receive_bytes()
-                audio_queue.put(chunk)
+
+                print(
+                    f"Audio chunk: {len(chunk)} bytes"
+                )
+
+                dg.send_media(chunk)
 
     except WebSocketDisconnect:
         print("Browser disconnected")
+
     except Exception as e:
-        print(e)
-        await websocket.send_text(
-            json.dumps({
-                "type": "error",
-                "message": str(e)
-            })
-        )
-    finally:
+
+        print("WebSocket Error:", e)
+
         try:
-            audio_queue.put(None)
+            await websocket.send_text(
+                json.dumps({
+                    "type": "error",
+                    "message": str(e)
+                })
+            )
         except:
             pass
-        print("Session ended")
+
+    finally:
+        try:
+            dg.send_finalize()
+        except:
+            pass

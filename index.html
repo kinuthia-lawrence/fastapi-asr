@@ -8,7 +8,7 @@
   </head>
   <body class="min-h-screen bg-white text-black">
     <main
-      class="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 px-4 py-8"
+      class="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-2 px-4 py-8"
     >
       <section class="border border-gray-300 rounded-lg shadow bg-white p-6">
         <h1 class="text-3xl font-bold">FastAPI ASR</h1>
@@ -19,17 +19,19 @@
       </section>
 
       <section class="grid gap-4 md:grid-cols-2">
-        <div class="border border-gray-300 rounded-lg shadow bg-white p-4">
-          <h2 class="text-lg font-semibold">Health Check</h2>
-
-          <button
-            id="healthBtn"
-            class="mt-3 rounded bg-black px-4 py-2 text-white"
-          >
-            Check Health
-          </button>
-
-          <pre id="healthResult" class="mt-3 text-sm"></pre>
+        <div
+          class="border border-gray-300 rounded-lg shadow bg-white p-4 text-sm leading-6"
+        >
+          <h2 class="text-lg font-semibold">How it works</h2>
+          <p class="mt-3">
+            1. Click <span class="font-semibold">Start Recording</span>.
+          </p>
+          <p>
+            2. The browser sends audio chunks over
+            <code class="font-mono">/ws</code>.
+          </p>
+          <p>3. The server forwards them to Deepgram sandbox.</p>
+          <p>4. Transcript events come back as JSON.</p>
         </div>
 
         <div class="border border-gray-300 rounded-lg shadow bg-white p-4">
@@ -37,7 +39,7 @@
 
           <button
             id="sampleBtn"
-            class="mt-3 rounded bg-black px-4 py-2 text-white"
+            class="mt-3 rounded bg-black px-4 py-2 text-white hover:bg-gray-800"
           >
             Run Sample
           </button>
@@ -70,21 +72,6 @@
           <h2 class="text-lg font-semibold">Transcript</h2>
           <div id="transcripts" class="mt-3 space-y-3"></div>
         </div>
-
-        <div
-          class="border border-gray-300 rounded-lg shadow bg-white p-4 text-sm leading-6"
-        >
-          <h2 class="text-lg font-semibold">How it works</h2>
-          <p class="mt-3">
-            1. Click <span class="font-semibold">Start Recording</span>.
-          </p>
-          <p>
-            2. The browser sends audio chunks over
-            <code class="font-mono">/ws</code>.
-          </p>
-          <p>3. The server forwards them to Deepgram sandbox.</p>
-          <p>4. Transcript events come back as JSON.</p>
-        </div>
       </section>
     </main>
 
@@ -103,6 +90,7 @@
       }
 
       function addTranscript(payload) {
+        console.log("Transcript payload:", payload);
         const item = document.createElement("div");
         item.className = "border border-black p-3";
 
@@ -125,43 +113,54 @@
       }
 
       function openSocket() {
-        socket = new WebSocket(socketUrl());
+        return new Promise((resolve, reject) => {
+          socket = new WebSocket(socketUrl());
 
-        socket.onopen = () => {
-          setStatus("connected");
-        };
+          socket.onopen = () => {
+            setStatus("connected");
+            console.log("WebSocket connection opened");
+            resolve();
+          };
 
-        socket.onmessage = (event) => {
-          if (typeof event.data !== "string") {
-            return;
-          }
+          socket.onerror = () => {
+            setStatus("error");
+            console.error("WebSocket error occurred");
+            reject(new Error("WebSocket error"));
+          };
 
-          let payload;
-          try {
-            payload = JSON.parse(event.data);
-          } catch {
-            if (event.data === "connected") {
-              setStatus("connected");
+          socket.onmessage = (event) => {
+            if (typeof event.data !== "string") {
+              return;
             }
-            return;
-          }
 
-          if (payload.type === "transcript" && payload.transcript) {
-            addTranscript(payload);
-          }
+            let payload;
+            try {
+              payload = JSON.parse(event.data);
+              console.log("Received payload:", payload);
+            } catch {
+              if (event.data === "connected") {
+                console.log("Connected to WebSocket");
+                setStatus("connected");
+              }
+              return;
+            }
 
-          if (payload.type === "error") {
-            setStatus(payload.message);
-          }
-        };
+            if (payload.type === "transcript" && payload.transcript) {
+              addTranscript(payload);
+              console.log("Transcript event:", payload.transcript);
+            }
 
-        socket.onclose = () => {
-          setStatus("closed");
-        };
+            if (payload.type === "error") {
+              setStatus(payload.message);
+              console.error("WebSocket error:", payload.message);
+            }
+          };
 
-        socket.onerror = () => {
-          setStatus("error");
-        };
+          socket.onclose = () => {
+            setStatus("closed");
+            console.log("WebSocket connection closed");
+          };
+        });
       }
 
       async function startRecording() {
@@ -170,7 +169,7 @@
 
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-        openSocket();
+        await openSocket();
 
         const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
           ? "audio/webm;codecs=opus"
@@ -180,18 +179,17 @@
           stream,
           mimeType ? { mimeType } : undefined,
         );
+        console.log("Recorder MIME:", recorder.mimeType);
 
         // Send each audio chunk to the websocket server.
         recorder.ondataavailable = async (event) => {
-          if (!event.data || event.data.size === 0) {
-            return;
-          }
-
           const buffer = await event.data.arrayBuffer();
 
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(buffer);
-          }
+          const bytes = new Uint8Array(buffer);
+
+          console.log("Header:", Array.from(bytes.slice(0, 8)));
+
+          socket.send(buffer);
         };
 
         recorder.onstart = () => {
@@ -201,6 +199,7 @@
         };
 
         recorder.onstop = () => {
+          console.log("Audio recording stopped");
           setStatus("stopped");
           startBtn.disabled = false;
           stopBtn.disabled = true;
@@ -237,23 +236,9 @@
       stopBtn.addEventListener("click", async () => {
         await stopRecording();
       });
-      const healthBtn = document.getElementById("healthBtn");
+
       const sampleBtn = document.getElementById("sampleBtn");
-
-      const healthResult = document.getElementById("healthResult");
-
       const sampleResult = document.getElementById("sampleResult");
-
-      healthBtn.addEventListener("click", async () => {
-        healthResult.textContent = "Checking...";
-
-        const response = await fetch("/health");
-
-        const data = await response.json();
-
-        healthResult.textContent = JSON.stringify(data, null, 2);
-      });
-
       sampleBtn.addEventListener("click", async () => {
         sampleResult.textContent = "Transcribing...";
 
