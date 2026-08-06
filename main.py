@@ -99,16 +99,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
             ready = threading.Event()
 
-            # -----------------------------
             # Deepgram connection opened
-            # -----------------------------
             def on_open(_):
                 print("Deepgram connected")
                 ready.set()
 
-            # -----------------------------
             # Transcript event
-            # -----------------------------
             def on_message(result):
                 print("EVENT:", getattr(result, "type", None))
                 print(result)
@@ -154,15 +150,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print("Transcript Error:", e)
 
-            # -----------------------------
             # Error event
-            # -----------------------------
             def on_error(error):
                 print("Deepgram Error:", error)
 
-            # -----------------------------
             # Register events
-            # -----------------------------
             dg.on(
                 EventType.OPEN,
                 on_open
@@ -181,9 +173,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except:
                 pass
 
-            # -----------------------------
             # Start listener thread
-            # -----------------------------
             listener_thread = threading.Thread(
                 target=dg.start_listening,
                 daemon=True
@@ -214,9 +204,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             print("Ready for microphone audio")
 
-            # -----------------------------
             # Keep-alive thread
-            # -----------------------------
             def keep_alive():
 
                 while True:
@@ -234,9 +222,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 daemon=True
             ).start()
 
-            # -----------------------------
             # Receive browser audio
-            # -----------------------------
             while True:
 
                 chunk = await websocket.receive_bytes()
